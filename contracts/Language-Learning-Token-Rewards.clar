@@ -27,6 +27,17 @@
 (define-constant err-daily-cap-reached (err u104))
 (define-constant err-invalid-lesson (err u105))
 
+
+(define-constant rookie-threshold u10)
+(define-constant streak-threshold u7)
+(define-constant marathon-threshold u50)
+
+(define-constant err-invalid-badge (err u200))
+(define-constant err-already-claimed (err u201))
+(define-constant err-not-eligible (err u202))
+
+(define-data-var next-badge-token-id uint u1)
+
 (define-data-var total-lessons uint u0)
 (define-data-var next-lesson-id uint u1)
 
@@ -224,3 +235,69 @@
     (ft-mint? learn-token amount recipient)
   )
 )
+
+
+(define-non-fungible-token learn-badge uint)
+
+(define-map user-badges
+  { user: principal, badge-id: uint }
+  { claimed: bool, token-id: uint }
+)
+
+(define-map badge-metadata
+  { badge-id: uint }
+  {
+    name: (string-ascii 50),
+    description: (string-ascii 150),
+    icon: (string-ascii 10)
+  }
+)
+
+(define-read-only (get-badge-info (badge-id uint))
+  (map-get? badge-metadata { badge-id: badge-id })
+)
+
+(define-read-only (has-badge (user principal) (badge-id uint))
+  (is-some (map-get? user-badges { user: user, badge-id: badge-id }))
+)
+
+(define-read-only (get-user-badge (user principal) (badge-id uint))
+  (map-get? user-badges { user: user, badge-id: badge-id })
+)
+
+(define-private (is-eligible-for-badge (user principal) (badge-id uint))
+  (let ((stats (get-user-stats user)))
+    (if (is-eq badge-id u0)
+        (>= (get total-completed stats) rookie-threshold)
+        (if (is-eq badge-id u1)
+            (>= (get current-streak stats) streak-threshold)
+            (if (is-eq badge-id u2)
+                (>= (get total-completed stats) marathon-threshold)
+                false
+            )
+        )
+    )
+  )
+)
+
+(define-public (claim-badge (badge-id uint))
+  (let ((token-id (var-get next-badge-token-id)))
+    (asserts! (<= badge-id u2) err-invalid-badge)
+    (asserts! (not (has-badge tx-sender badge-id)) err-already-claimed)
+    (asserts! (is-eligible-for-badge tx-sender badge-id) err-not-eligible)
+    (map-set user-badges
+      { user: tx-sender, badge-id: badge-id }
+      { claimed: true, token-id: token-id }
+    )
+    (var-set next-badge-token-id (+ token-id u1))
+    (try! (nft-mint? learn-badge token-id tx-sender))
+    (ok { badge-id: badge-id, token-id: token-id })
+  )
+)
+
+(map-set badge-metadata { badge-id: u0 }
+  { name: "Rookie Scholar", description: "Complete 10 lessons to earn your first badge", icon: "ROOKIE" })
+(map-set badge-metadata { badge-id: u1 }
+  { name: "Streak Master", description: "Maintain a 7-day learning streak", icon: "STREAK" })
+(map-set badge-metadata { badge-id: u2 }
+  { name: "Marathon Learner", description: "Complete 50 lessons to prove your dedication", icon: "MARATHON" })
