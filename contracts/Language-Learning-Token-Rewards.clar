@@ -301,3 +301,92 @@
   { name: "Streak Master", description: "Maintain a 7-day learning streak", icon: "STREAK" })
 (map-set badge-metadata { badge-id: u2 }
   { name: "Marathon Learner", description: "Complete 50 lessons to prove your dedication", icon: "MARATHON" })
+
+
+(define-constant reviewer-eligibility-threshold u25)
+(define-constant review-reward u100000)
+(define-constant max-reviews-per-lesson u3)
+
+(define-constant err-not-eligible-reviewer (err u300))
+(define-constant err-cannot-review-own (err u301))
+(define-constant err-already-reviewed (err u302))
+(define-constant err-max-reviews-reached (err u303))
+(define-constant err-lesson-not-completed (err u304))
+
+(define-map peer-reviews
+  { reviewer: principal, reviewee: principal, lesson-id: uint }
+  { approved: bool, reviewed-at: uint, comments: (string-ascii 200) }
+)
+
+(define-map lesson-review-count
+  { reviewee: principal, lesson-id: uint }
+  { count: uint }
+)
+
+(define-map reviewer-stats
+  { reviewer: principal }
+  { total-reviews: uint, approvals: uint, rejections: uint }
+)
+
+(define-map user-reputation
+  { user: principal }
+  { total-reviews-received: uint, positive-reviews: uint, reputation-score: uint }
+)
+
+(define-read-only (is-eligible-reviewer (user principal))
+  (let ((stats (get-user-stats user)))
+    (>= (get total-completed stats) reviewer-eligibility-threshold)
+  )
+)
+
+(define-read-only (get-review-stats (reviewer principal))
+  (default-to
+    { total-reviews: u0, approvals: u0, rejections: u0 }
+    (map-get? reviewer-stats { reviewer: reviewer })
+  )
+)
+
+(define-read-only (get-user-reputation (user principal))
+  (default-to
+    { total-reviews-received: u0, positive-reviews: u0, reputation-score: u0 }
+    (map-get? user-reputation { user: user })
+  )
+)
+
+(define-public (submit-peer-review (reviewee principal) (lesson-id uint) (approved bool) (comments (string-ascii 200)))
+  (let ((reviewee-progress (get-user-progress reviewee lesson-id))
+        (review-count-data (default-to { count: u0 } (map-get? lesson-review-count { reviewee: reviewee, lesson-id: lesson-id })))
+        (reviewer-data (get-review-stats tx-sender))
+        (reputation-data (get-user-reputation reviewee)))
+    (asserts! (is-eligible-reviewer tx-sender) err-not-eligible-reviewer)
+    (asserts! (not (is-eq tx-sender reviewee)) err-cannot-review-own)
+    (asserts! (is-some reviewee-progress) err-lesson-not-completed)
+    (asserts! (is-none (map-get? peer-reviews { reviewer: tx-sender, reviewee: reviewee, lesson-id: lesson-id })) err-already-reviewed)
+    (asserts! (< (get count review-count-data) max-reviews-per-lesson) err-max-reviews-reached)
+    (map-set peer-reviews
+      { reviewer: tx-sender, reviewee: reviewee, lesson-id: lesson-id }
+      { approved: approved, reviewed-at: stacks-block-height, comments: comments }
+    )
+    (map-set lesson-review-count
+      { reviewee: reviewee, lesson-id: lesson-id }
+      { count: (+ (get count review-count-data) u1) }
+    )
+    (map-set reviewer-stats
+      { reviewer: tx-sender }
+      { total-reviews: (+ (get total-reviews reviewer-data) u1),
+        approvals: (if approved (+ (get approvals reviewer-data) u1) (get approvals reviewer-data)),
+        rejections: (if approved (get rejections reviewer-data) (+ (get rejections reviewer-data) u1)) }
+    )
+    (let ((new-positive (if approved (+ (get positive-reviews reputation-data) u1) (get positive-reviews reputation-data)))
+          (new-total (+ (get total-reviews-received reputation-data) u1)))
+      (map-set user-reputation
+        { user: reviewee }
+        { total-reviews-received: new-total,
+          positive-reviews: new-positive,
+          reputation-score: (/ (* new-positive u100) new-total) }
+      )
+    )
+    (try! (ft-mint? learn-token review-reward tx-sender))
+    (ok { reviewed: reviewee, lesson: lesson-id, approved: approved })
+  )
+)
