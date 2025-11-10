@@ -390,3 +390,104 @@
     (ok { reviewed: reviewee, lesson: lesson-id, approved: approved })
   )
 )
+
+
+(define-constant referral-commission u100000)
+(define-constant mentor-milestone-reward u250000)
+(define-constant mentor-eligibility-lessons u30)
+(define-constant max-mentees-per-mentor u10)
+
+(define-constant err-invalid-referral (err u400))
+(define-constant err-already-referred (err u401))
+(define-constant err-not-eligible-mentor (err u402))
+(define-constant err-max-mentees (err u403))
+(define-constant err-already-has-mentor (err u404))
+
+(define-map referral-codes
+  { code: (string-ascii 20) }
+  { referrer: principal, created-at: uint, active: bool }
+)
+
+(define-map user-referrals
+  { user: principal }
+  { referred-by: (optional principal), referral-code: (string-ascii 20), total-referrals: uint }
+)
+
+(define-map mentorships
+  { mentor: principal, mentee: principal }
+  { started-at: uint, mentee-lessons-at-start: uint, milestones-achieved: uint }
+)
+
+(define-map mentor-stats
+  { mentor: principal }
+  { total-mentees: uint, active-mentees: uint, total-earnings: uint }
+)
+
+(define-read-only (get-referral-info (user principal))
+  (map-get? user-referrals { user: user })
+)
+
+(define-read-only (get-mentor-stats (mentor principal))
+  (default-to
+    { total-mentees: u0, active-mentees: u0, total-earnings: u0 }
+    (map-get? mentor-stats { mentor: mentor })
+  )
+)
+
+(define-public (create-referral-code (code (string-ascii 20)))
+  (begin
+    (asserts! (is-none (map-get? referral-codes { code: code })) err-invalid-referral)
+    (map-set referral-codes
+      { code: code }
+      { referrer: tx-sender, created-at: stacks-block-height, active: true }
+    )
+    (ok code)
+  )
+)
+
+(define-public (register-with-referral (code (string-ascii 20)))
+  (let ((code-data (unwrap! (map-get? referral-codes { code: code }) err-invalid-referral))
+        (existing-referral (map-get? user-referrals { user: tx-sender })))
+    (asserts! (is-none existing-referral) err-already-referred)
+    (asserts! (get active code-data) err-invalid-referral)
+    (let ((referrer (get referrer code-data)))
+      (asserts! (not (is-eq tx-sender referrer)) err-invalid-referral)
+      (map-set user-referrals
+        { user: tx-sender }
+        { referred-by: (some referrer), referral-code: code, total-referrals: u0 }
+      )
+      (map-set user-referrals
+        { user: referrer }
+        (merge
+          (default-to { referred-by: none, referral-code: "", total-referrals: u0 } (map-get? user-referrals { user: referrer }))
+          { total-referrals: (+ (default-to u0 (get total-referrals (map-get? user-referrals { user: referrer }))) u1) }
+        )
+      )
+      (ok { referrer: referrer, code: code })
+    )
+  )
+)
+
+(define-public (become-mentor (mentee principal))
+  (let ((mentor-stats-data (get-mentor-stats tx-sender))
+        (mentor-lessons (get total-completed (get-user-stats tx-sender)))
+        (existing-mentorship (map-get? mentorships { mentor: tx-sender, mentee: mentee })))
+    (asserts! (>= mentor-lessons mentor-eligibility-lessons) err-not-eligible-mentor)
+    (asserts! (< (get active-mentees mentor-stats-data) max-mentees-per-mentor) err-max-mentees)
+    (asserts! (not (is-eq tx-sender mentee)) err-invalid-referral)
+    (asserts! (is-none existing-mentorship) err-already-has-mentor)
+    (let ((mentee-stats (get-user-stats mentee)))
+      (map-set mentorships
+        { mentor: tx-sender, mentee: mentee }
+        { started-at: stacks-block-height, mentee-lessons-at-start: (get total-completed mentee-stats), milestones-achieved: u0 }
+      )
+      (map-set mentor-stats
+        { mentor: tx-sender }
+        { total-mentees: (+ (get total-mentees mentor-stats-data) u1),
+          active-mentees: (+ (get active-mentees mentor-stats-data) u1),
+          total-earnings: (get total-earnings mentor-stats-data) }
+      )
+      (ok { mentor: tx-sender, mentee: mentee })
+    )
+  )
+)
